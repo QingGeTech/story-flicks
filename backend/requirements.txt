@@ -6,7 +6,7 @@ pydantic-settings==2.1.0
 python-dotenv==1.0.0
 openai==1.59.7
 dashscope==1.22.0
-edge_tts==6.1.19
+edge_tts==7.2.7
 loguru==0.7.2
 numpy==1.25.0
 moviepy==2.1.1

@@ -148,7 +148,10 @@ class LLMService:
                     "Authorization": "Bearer " + settings.siliconflow_api_key,
                     "Content-Type": "application/json"
                 }
+                print(json.dumps(payload, indent=4, ensure_ascii=False))
+                print(json.dumps(headers, indent=4, ensure_ascii=False))
                 response = requests.request("POST", "https://api.siliconflow.cn/v1/images/generations", json=payload, headers=headers)
+                print(response.json())
                 if response.text != None:
                     response = json.loads(response.text)
                     return response["images"][0]["url"]

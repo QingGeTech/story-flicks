@@ -7,7 +7,8 @@ import edge_tts
 import re
 import xml.sax.saxutils
 from edge_tts import SubMaker, submaker
-from edge_tts.submaker import mktimestamp
+# from edge_tts.submaker import mktimestamp
+import math
 from moviepy.video.tools import subtitles
 from loguru import logger
 from typing import Tuple
@@ -31,6 +32,7 @@ PUNCTUATIONS = [
     "！",
     "...",
 ]
+
 
 def split_string_by_punctuations(s):
     result = []
@@ -63,14 +65,15 @@ def split_string_by_punctuations(s):
             txt = ""
     if txt.strip():  # 最后一段如果非空也要添加
         result.append(txt.strip())
-    
+
     # 过滤掉空字符串和只包含标点符号的片段
     def is_valid_segment(segment):
         # 去掉所有标点符号后还有内容的才是有效片段
         return bool(re.sub(r'[^\w\s]', '', segment).strip())
-    
+
     result = list(filter(is_valid_segment, result))
     return result
+
 
 def get_all_azure_voices(filter_locals=None) -> list[str]:
     if filter_locals is None:
@@ -1086,7 +1089,8 @@ def convert_rate_to_percent(rate: float) -> str:
         return f"{percent}%"
 
 
-async def generate_voice(text: str, voice_name: str, voice_rate: float = 0, audio_file: str = None, subtitle_file: str = None) -> Tuple[str, str]:
+async def generate_voice(text: str, voice_name: str, voice_rate: float = 0, audio_file: str = None,
+                         subtitle_file: str = None) -> Tuple[str, str]:
     """生成语音和字幕
 
     Args:
@@ -1111,7 +1115,7 @@ async def generate_voice(text: str, voice_name: str, voice_rate: float = 0, audi
         await generate_subtitle(sub_maker, text, subtitle_file)
     else:
         logger.error("Failed to generate sub_maker")
-    
+
     return audio_file, subtitle_file
 
 
@@ -1124,17 +1128,23 @@ async def edge_tts_voice(text: str, voice_name: str, voice_file: str, voice_rate
 
             communicate = edge_tts.Communicate(text, voice_name, rate=rate_str)
             sub_maker = edge_tts.SubMaker()
-            
+
             with open(voice_file, "wb") as file:
                 async for chunk in communicate.stream():
+                    # logger.info(f"new chunk")
                     if chunk["type"] == "audio":
                         file.write(chunk["data"])
-                    elif chunk["type"] == "WordBoundary":
+                    # elif chunk["type"] == "WordBoundary":
+                    elif chunk["type"] == "SentenceBoundary":
                         logger.debug(f"Got word boundary: {chunk}")
                         # 使用 SubMaker 的 create_sub 方法创建字幕
-                        sub_maker.create_sub((chunk["offset"], chunk["duration"]), chunk["text"])
+                        # sub_maker.create_sub((chunk["offset"], chunk["duration"]), chunk["text"])
+                        sub_maker.feed(chunk)
+                    else:
+                        logger.info(f"chunk: {json.dumps(chunk, indent=2, ensure_ascii=False)}")
 
-            if not sub_maker or not sub_maker.subs:
+            # if not sub_maker or not sub_maker.subs:
+            if not sub_maker.cues:
                 logger.warning("failed, sub_maker is None or sub_maker.subs is None")
                 continue
 
@@ -1149,15 +1159,16 @@ async def edge_tts_voice(text: str, voice_name: str, voice_file: str, voice_rate
 async def generate_subtitle(sub_maker: edge_tts.SubMaker, text: str, subtitle_file: str):
     """生成字幕文件"""
     try:
-        if not sub_maker or not hasattr(sub_maker, "subs") or not sub_maker.subs:
-            print("No subtitles to generate: sub_maker is None or sub_maker.subs is empty")
-            return
+        # if not sub_maker or not hasattr(sub_maker, "subs") or not sub_maker.subs:
+        # if not sub_maker or not sub_maker.cues:
+        #     print("No subtitles to generate: sub_maker is None or sub_maker.subs is empty")
+        #     return
 
-        print(f"Generating subtitles with {len(sub_maker.subs)} items")
-        
+        print(f"Generating subtitles with {len(sub_maker.cues)} items")
+
         # 直接使用创建字幕的函数
         await create_subtitle(sub_maker=sub_maker, text=text, subtitle_file=subtitle_file)
-            
+
     except Exception as e:
         print(f"failed to generate subtitle: {str(e)}")
         import traceback
@@ -1184,92 +1195,59 @@ def _format_text(text: str) -> str:
     return text
 
 
-
-
 async def create_subtitle(sub_maker: edge_tts.SubMaker, text: str, subtitle_file: str):
     """
-    优化字幕文件
-    1. 将字幕文件按照标点符号分割成多行
-    2. 逐行匹配字幕文件中的文本
-    3. 生成新的字幕文件
+    优化字幕文件：直接利用 SubMaker 的 cues (Subtitle 对象列表)
     """
+    # 格式化原始文本用于逻辑对比（可选）
     text = _format_text(text)
-
-    def formatter(idx: int, start_time: float, end_time: float, sub_text: str) -> str:
-        """
-        1
-        00:00:00,000 --> 00:00:02,360
-        跑步是一项简单易行的运动
-        """
-        start_t = mktimestamp(start_time).replace(".", ",")
-        end_t = mktimestamp(end_time).replace(".", ",")
-        return f"{idx}\n{start_t} --> {end_t}\n{sub_text}\n"
-
-    start_time = -1.0
-    sub_items = []
-    sub_index = 0
-
     script_lines = split_string_by_punctuations(text)
-    logger.debug(f"Split text into {len(script_lines)} lines: {script_lines}")
 
-    def match_line(_sub_line: str, _sub_index: int):
-        if len(script_lines) <= _sub_index:
-            return ""
+    sub_items = []
 
-        _line = script_lines[_sub_index]
-        if _sub_line == _line:
-            return script_lines[_sub_index].strip()
-
-        _sub_line_ = re.sub(r"[^\w\s]", "", _sub_line)
-        _line_ = re.sub(r"[^\w\s]", "", _line)
-        if _sub_line_ == _line_:
-            return _line_.strip()
-
-        _sub_line_ = re.sub(r"\W+", "", _sub_line)
-        _line_ = re.sub(r"\W+", "", _line)
-        if _sub_line_ == _line_:
-            return _line.strip()
-
-        return ""
-
-    sub_line = ""
+    def format_srt_time(td):
+        """将 timedelta 转换为 00:00:00,000 格式"""
+        total_seconds = int(td.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        millis = int(td.microseconds / 1000)
+        return f"{hours:02}:{minutes:02}:{seconds:02},{millis:03}"
 
     try:
-        for _, (offset, sub) in enumerate(zip(sub_maker.offset, sub_maker.subs)):
-            _start_time, end_time = offset
-            if start_time < 0:
-                start_time = _start_time
+        # sub_maker.cues 包含 Subtitle(index, start, end, content)
+        for i, cue in enumerate(sub_maker.cues):
+            # 1. 清洗内容（处理 HTML 转义字符）
+            clean_content = unescape(cue.content).strip()
 
-            sub = unescape(sub)
-            sub_line += sub
-            sub_text = match_line(sub_line, sub_index)
-            if sub_text:
-                sub_index += 1
-                line = formatter(
-                    idx=sub_index,
-                    start_time=start_time,
-                    end_time=end_time,
-                    sub_text=sub_text,
-                )
-                sub_items.append(line)
-                start_time = -1.0
-                sub_line = ""
-        if len(sub_items) == len(script_lines):
+            # 2. 如果文本中有标点分割后的匹配需求，可以在这里做简单校验
+            # 但既然是 SentenceBoundary，cue.content 通常就是完整的一句
+            display_text = clean_content
+
+            # 如果你想强制使用 split_string_by_punctuations 里的原文
+            if i < len(script_lines):
+                # 简单校验：如果去标点后一致，则使用原文（带标点）
+                s1 = re.sub(r"\W+", "", clean_content)
+                s2 = re.sub(r"\W+", "", script_lines[i])
+                if s1 == s2:
+                    display_text = script_lines[i].strip()
+
+            # 3. 构造 SRT 格式
+            line = (
+                f"{i + 1}\n"
+                f"{format_srt_time(cue.start)} --> {format_srt_time(cue.end)}\n"
+                f"{display_text}\n"
+            )
+            sub_items.append(line)
+
+        # 写入文件
+        if sub_items:
             with open(subtitle_file, "w", encoding="utf-8") as file:
                 file.write("\n".join(sub_items) + "\n")
-            try:
-                sbs = subtitles.file_to_subtitles(subtitle_file, encoding="utf-8")
-                duration = max([tb for ((ta, tb), txt) in sbs])
-                logger.info(
-                    f"completed, subtitle file created: {subtitle_file}, duration: {duration}"
-                )
-            except Exception as e:
-                logger.error(f"failed, error: {str(e)}")
-                os.remove(subtitle_file)
+
+            logger.info(f"completed, subtitle file created: {subtitle_file}, lines: {len(sub_items)}")
         else:
-            logger.error(
-                f"failed, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)}"
-            )
+            logger.error("failed, no subtitles items generated")
 
     except Exception as e:
-        logger.error(f"failed, error: {str(e)}")
+        logger.error(f"failed to create subtitle, error: {str(e)}")
